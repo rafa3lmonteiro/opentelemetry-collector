@@ -1,0 +1,117 @@
+#########################################################
+# OpenTelemetry Collector Agent                         #
+# Rafael Conte Monteiro                                 #
+# updated: 13/08/2025                                   #
+#########################################################
+
+# Nome customizado para os recursos do Helm
+nameOverride: opentelemetry-collector-agt
+fullnameOverride: opentelemetry-collector-agt
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: 0.128.0
+  pullPolicy: IfNotPresent
+
+mode: deployment
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "1.5"
+    memory: "1.5Gi"
+
+configMap:
+  create: true
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc: {}   # Porta 4317 (gRPC) - apps com SDK usam gRPC internamente
+        http: {}   # Porta 4318 (HTTP) - apps sem SDK enviam JSON estruturado
+
+  processors:
+    # Batch ajustado para limitar o "peso" de cada lote em memória do Agent
+    batch:
+      send_batch_size: 1024   # ~1k registros por lote: bom equilíbrio em DEV
+      timeout: 1s             # flush rápido evita lotes gigantes e reduz latência
+
+  exporters:
+    debug:
+      verbosity: detailed
+
+    # Export usando protocolo gRPC/HTTP2 + TLS com o ELK-Corp
+    otlp:
+      endpoint: your-endpoint-url:4317
+      tls:
+        ca_file: /etc/otel/certs/ca.crt
+        insecure: false
+        insecure_skip_verify: false
+        server_name_override: your-endpoint-url 
+      # Fila em memória mais conservadora (evita pressão de RAM em bursts)
+      sending_queue:
+        enabled: true
+        num_consumers: 4     # paralelismo adequado para 500m–1.5 CPU
+        queue_size: 1000     # buffer suficiente sem arriscar OOM
+      # Retry sem desistir (alinha com "zero perda")
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 0s  # 0 = retries ilimitados
+
+  extensions:
+    health_check:
+      endpoint: "0.0.0.0:13133"
+
+  service:
+    extensions: [health_check]
+    pipelines:
+      logs:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [otlp, debug]
+
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [otlp, debug]
+
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [otlp, debug]
+
+# Probes (Sondas) para o Kubernetes monitorar saúde do Collector
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+
+# Monta o certificado da CA como volume no Pod do Collector
+# Precisa ter a secret com a CA Root aplicada no Kubernetes
+extraVolumes:
+  - name: otel-ca
+    secret:
+      secretName: opentelemetry-collector-cert
+
+# Monta o volume da CA no caminho esperado pelo exporter
+extraVolumeMounts:
+  - name: otel-ca
+    mountPath: /etc/otel/certs
+    readOnly: true

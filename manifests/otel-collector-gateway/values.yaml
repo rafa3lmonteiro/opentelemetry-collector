@@ -1,0 +1,199 @@
+#########################################################
+# OpenTelemetry Collector Gateway                       #
+# Rafael Conte Monteiro                                 # 
+# updated: 13/08/2025                                   #
+#########################################################
+
+# Nome customizado para os recursos do Helm
+nameOverride: opentelemetry-collector-gw
+fullnameOverride: opentelemetry-collector-gw
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: 0.128.0
+  pullPolicy: IfNotPresent
+
+mode: deployment
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: "1"
+    memory: "2Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# (Opcional) HPA – Autoscaling caso seja necessario em PRD
+# autoscaling:
+#   enabled: true
+#   minReplicas: 3
+#   maxReplicas: 5
+#   targetCPUUtilizationPercentage: 70
+#   targetMemoryUtilizationPercentage: 80
+
+# Fixar Collector Gateway no node pool "your-node-pool"
+nodeSelector:
+  agentpool: your-node-pool
+  your-role: otel-collector
+
+tolerations:
+  - key: "your-role"
+    operator: "Equal"
+    value: "otel-collector"
+    effect: "NoSchedule"
+
+configMap:
+  create: true
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc: {}   # Porta padrão 4317
+        http: {}   # Porta padrão 4318
+
+  processors:
+    transform:
+      log_statements:
+        - context: resource
+          statements:
+            # Defaults quando faltar atributos
+            - set(attributes["project.name"], "unknown") where attributes["project.name"] == nil or attributes["project.name"] == ""
+            - set(attributes["service.name"], "unknown") where attributes["service.name"] == nil or attributes["service.name"] == ""
+            - set(attributes["deployment.environment"], "default") where attributes["deployment.environment"] == nil or attributes["deployment.environment"] == ""
+            # Normaliza para lowercase
+            - set(attributes["project.name"], ToLowerCase(attributes["project.name"]))
+            - set(attributes["service.name"], ToLowerCase(attributes["service.name"]))
+            - set(attributes["deployment.environment"], ToLowerCase(attributes["deployment.environment"]))
+            # Monta logs-<project>-<service>-<env>
+            - set(attributes["elasticsearch.index"], Concat(["logs", attributes["project.name"], attributes["service.name"], attributes["deployment.environment"]], "-"))
+            # Remove chaves custom que não queremos propagar
+            - delete_key(attributes, "otelTraceID")
+            - delete_key(attributes, "otelSpanID")
+
+        - context: log
+          statements:
+            # Força log.level (ECS) a ficar minúsculo via severity_text
+            - set(severity_text, ToLowerCase(severity_text)) where severity_text != nil
+            # Remove chaves custom também no nível do log
+            - delete_key(attributes, "otelTraceID")
+            - delete_key(attributes, "otelSpanID")
+
+      trace_statements:
+        - context: resource
+          statements:
+            # Defaults/normalização para traces (NÃO definir elasticsearch.index → mantém padrão APM/data streams)
+            - set(attributes["project.name"], "unknown") where attributes["project.name"] == nil or attributes["project.name"] == ""
+            - set(attributes["service.name"], "unknown") where attributes["service.name"] == nil or attributes["service.name"] == ""
+            - set(attributes["deployment.environment"], "default") where attributes["deployment.environment"] == nil or attributes["deployment.environment"] == ""
+            - set(attributes["project.name"], ToLowerCase(attributes["project.name"]))
+            - set(attributes["service.name"], ToLowerCase(attributes["service.name"]))
+            - set(attributes["deployment.environment"], ToLowerCase(attributes["deployment.environment"]))
+
+    # Batch ajustado: controla o tamanho de cada lote em memória
+    batch:
+      send_batch_size: 2048
+      timeout: 1s
+
+  exporters:
+    debug:
+      verbosity: detailed
+
+    # ----------------- LOGS → Elasticsearch (ECS) -----------------
+    elasticsearch/logs:
+      endpoints: ["http://your-elastic-url-http:9200"]
+      user: ${YOUR_ELASTIC_USER}
+      password: ${YOUR_ELASTIC_PASSWD}
+      tls:
+        insecure: true
+      # Apenas logs terão índice custom (via atributo elasticsearch.index) + diário
+      logstash_format:
+        enabled: true
+        date_format: "%Y.%m.%d"
+
+      # Mapping ECS para criar dashboards ECS no Kibana
+      mapping:
+        mode: ecs
+
+      # Fila em memória (sem disco) com paralelismo maior para drenar picos
+      sending_queue:
+        enabled: true
+        num_consumers: 6
+        queue_size: 300
+
+      # Retry sem desistir (evita perda durante respiros do ES/rede)
+      retry:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 60s
+
+    # -------- TRACES/METRICS → Elasticsearch (OTel/APM) ----------
+    elasticsearch/apm:
+      endpoints: ["http://your-elastic-url-http:9200"]
+      user: ${YOUR_ELASTIC_USER}
+      password: ${YOUR_ELASTIC_PASSWD}
+      tls:
+        insecure: true
+
+      # Mantém OTel p/ data streams APM e métricas
+      mapping:
+        mode: otel
+
+      sending_queue:
+        enabled: true
+        num_consumers: 6
+        queue_size: 300
+
+      retry:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 60s
+
+  extensions:
+    health_check:
+      endpoint: "0.0.0.0:13133"
+
+  service:
+    extensions: [health_check]
+    pipelines:
+      logs:
+        receivers: [otlp]
+        processors: [transform, batch]
+        exporters: [elasticsearch/logs, debug]
+
+      traces:
+        receivers: [otlp]
+        processors: [transform, batch]   # apenas defaults/normalização; sem mudar índice
+        exporters: [elasticsearch/apm, debug]
+
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [elasticsearch/apm, debug]
+
+# Probes HTTP no /healthz do health_check
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+
+extraEnvs:
+  - name: YOUR_ELASTIC_USER
+    value: elastic
+  - name: YOUR_ELASTIC_PASSWD
+    valueFrom:
+      secretKeyRef:
+        name: your-elastic-url-elastic-user
+        key: elastic
