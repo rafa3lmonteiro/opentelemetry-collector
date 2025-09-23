@@ -109,3 +109,5 @@ Update the **exporter configuration** to match your Elasticsearch endpoint and c
 ---
 
 ✍️ Maintained by [Rafael Monteiro](https://github.com/rafa3lmonteiro)
+
+---
