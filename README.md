@@ -15,7 +15,7 @@ There are two main deployment patterns:
 - **Gateway**: runs as a centralized deployment, receiving telemetry from multiple agents and forwarding the data to external backends (e.g., Elasticsearch).
 
 ---
-
+   
 ## Why use it with ELK?
 
 By combining **OpenTelemetry Collector** with **ELK Stack**, you can:
