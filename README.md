@@ -2,7 +2,7 @@
 
 This repository contains example manifests and configurations to deploy the **OpenTelemetry Collector** in Kubernetes environments, with the purpose of sending **logs, metrics, and traces** to an **ELK Stack (Elasticsearch, Logstash, Kibana)**.
 
----
+---  
 
 ## What is the OpenTelemetry Collector?
 
